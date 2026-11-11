@@ -1,8 +1,8 @@
-const express = require("express");
+import express from 'express';
 const router = express.Router();
 
-const offersController = require("../controllers/offersController");
-const authMiddleware = require("../middleware/authMiddleware");
+import * as offersController from '../controllers/offersController.js';
+import * as authMiddleware from '../middleware/authMiddleware.js';
 
 // ============================
 // PUBLIC ROUTES
@@ -13,6 +13,7 @@ router.get("/search", offersController.searchOffers);
 
 // Liste des offres
 router.get("/", offersController.getAllOffers);
+router.get("/mine", authMiddleware.requireAuth, authMiddleware.requireRole('manager'), offersController.getManagerOffers);
 
 // Détail d'une offre
 router.get("/:id", offersController.getOfferById);
@@ -30,4 +31,4 @@ router.put("/:id", authMiddleware.requireAuth, authMiddleware.requireRole('manag
 // Supprimer une offre
 router.delete("/:id", authMiddleware.requireAuth, authMiddleware.requireRole('manager'), offersController.deleteOffer);
 
-module.exports = router;
+export default router;

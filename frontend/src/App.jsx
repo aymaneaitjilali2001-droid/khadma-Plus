@@ -17,8 +17,22 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route path="/job-details/:id" element={<JobDetails />} />
-        <Route path="/condidat-form/:id" element={<CondidatForm />} />
-        <Route path="/job-form" element={<JobForm />} />
+        <Route
+          path="/condidat-form/:id"
+          element={
+            <ProtectedRoute role="candidate">
+              <CondidatForm />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/job-form"
+          element={
+            <ProtectedRoute role="manager">
+              <JobForm />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/dashboard"
           element={

@@ -1,20 +1,35 @@
-const pool = require('../config/db');
+import pool from '../config/db.js';
 
+/**
+ * Ajoute les tags associés à chaque offre.
+ *
+ * La table `jobs` contient les informations principales de l'offre,
+ * tandis que la table `job_tags` contient une ligne par tag. Cette
+ * fonction regroupe donc les tags par `job_id`, puis les ajoute dans
+ * une propriété `tags` de chaque objet offre.
+ *
+ * @param {Array<Object>} offers Liste des offres récupérées depuis MySQL.
+ * @returns {Promise<Array<Object>>} Les mêmes offres avec leur tableau `tags`.
+ */
 async function attachTags(offers) {
+    // Aucune requête supplémentaire n'est nécessaire s'il n'y a pas d'offre.
     if (offers.length === 0) return offers;
 
+    // Récupère les identifiants des offres pour filtrer les tags correspondants.
     const ids = offers.map((offer) => offer.id);
     const [tagRows] = await pool.query(
         `SELECT job_id, tag FROM job_tags WHERE job_id IN (${ids.map(() => '?').join(',')})`,
         ids
     );
 
+    // Construit une structure de regroupement : { jobId: [tag1, tag2, ...] }.
     const tagsByJobId = {};
     for (const row of tagRows) {
         if (!tagsByJobId[row.job_id]) tagsByJobId[row.job_id] = [];
         tagsByJobId[row.job_id].push(row.tag);
     }
 
+    // Retourne chaque offre avec ses tags, ou un tableau vide si elle n'en possède pas.
     return offers.map((offer) => ({ ...offer, tags: tagsByJobId[offer.id] || [] }));
 }
 
@@ -22,7 +37,7 @@ async function attachTags(offers) {
 // GET ALL OFFERS
 // GET /api/offers
 // ===============================
-exports.getAllOffers = async (req, res) => {
+async function getAllOffers(req, res) {
     try {
 
         const { status } = req.query;
@@ -44,12 +59,25 @@ exports.getAllOffers = async (req, res) => {
     }
 };
 
+async function getManagerOffers(req, res) {
+    try {
+        const [offers] = await pool.query(
+            'SELECT * FROM jobs WHERE manager_id = ? ORDER BY created_at DESC',
+            [req.user.id]
+        );
+        res.status(200).json(await attachTags(offers));
+    } catch (error) {
+        console.error('Erreur getManagerOffers:', error);
+        res.status(500).json({ message: 'Erreur lors de la récupération de vos offres.' });
+    }
+}
+
 
 // ===============================
 // GET OFFER BY ID
 // GET /api/offers/:id
 // ===============================
-exports.getOfferById = async (req, res) => {
+async function getOfferById(req, res) {
 
     try {
         const id = req.params.id;
@@ -84,7 +112,7 @@ exports.getOfferById = async (req, res) => {
 // CREATE OFFER
 // POST /api/offers
 // ===============================
-exports.createOffer = async (req, res) => {
+async function createOffer(req, res) {
 
     try {
 
@@ -127,13 +155,16 @@ exports.createOffer = async (req, res) => {
 // UPDATE OFFER
 // PUT /api/offers/:id
 // ===============================
-exports.updateOffer = async (req, res) => {
+async function updateOffer(req, res) {
 
     try {
 
         const id = req.params.id;
 
-        const [existing] = await pool.query('SELECT * FROM jobs WHERE id = ?', [id]);
+        const [existing] = await pool.query(
+            'SELECT * FROM jobs WHERE id = ? AND manager_id = ?',
+            [id, req.user.id]
+        );
 
         if (!existing || existing.length === 0) {
 
@@ -146,8 +177,8 @@ exports.updateOffer = async (req, res) => {
         const { title, company, location, contract, description, status, tags } = req.body;
 
         await pool.query(
-            'UPDATE jobs SET title = ?, company = ?, location = ?, contract = ?, description = ?, status = ? WHERE id = ?',
-            [title, company, location, contract, description, status, id]
+            'UPDATE jobs SET title = ?, company = ?, location = ?, contract = ?, description = ?, status = ? WHERE id = ? AND manager_id = ?',
+            [title, company, location, contract, description, status, id, req.user.id]
         );
 
         if (Array.isArray(tags)) {
@@ -160,7 +191,10 @@ exports.updateOffer = async (req, res) => {
             }
         }
 
-        const [rows] = await pool.query('SELECT * FROM jobs WHERE id = ?', [id]);
+        const [rows] = await pool.query(
+            'SELECT * FROM jobs WHERE id = ? AND manager_id = ?',
+            [id, req.user.id]
+        );
         const [withTags] = await attachTags(rows);
 
         res.status(200).json({
@@ -185,13 +219,16 @@ exports.updateOffer = async (req, res) => {
 // DELETE OFFER
 // DELETE /api/offers/:id
 // ===============================
-exports.deleteOffer = async (req, res) => {
+async function deleteOffer(req, res) {
 
     try {
 
         const id = req.params.id;
 
-        const [existing] = await pool.query('SELECT * FROM jobs WHERE id = ?', [id]);
+        const [existing] = await pool.query(
+            'SELECT * FROM jobs WHERE id = ? AND manager_id = ?',
+            [id, req.user.id]
+        );
 
         if (!existing || existing.length === 0) {
 
@@ -201,7 +238,7 @@ exports.deleteOffer = async (req, res) => {
 
         }
 
-        await pool.query('DELETE FROM jobs WHERE id = ?', [id]);
+        await pool.query('DELETE FROM jobs WHERE id = ? AND manager_id = ?', [id, req.user.id]);
 
         res.status(200).json({
             message: "Offre supprimée."
@@ -224,7 +261,7 @@ exports.deleteOffer = async (req, res) => {
 // SEARCH OFFERS
 // GET /api/offers/search?q=react
 // ===============================
-exports.searchOffers = async (req, res) => {
+async function searchOffers(req, res) {
 
     try {
 
@@ -247,4 +284,14 @@ exports.searchOffers = async (req, res) => {
 
     }
 
+}
+
+export {
+    getAllOffers,
+    getManagerOffers,
+    getOfferById,
+    createOffer,
+    updateOffer,
+    deleteOffer,
+    searchOffers,
 };

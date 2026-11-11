@@ -1,18 +1,26 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-require('dotenv').config();
+import express from 'express';
+import cors from 'cors';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import 'dotenv/config';
 
-const processResume = require('./services/_process-resume');
+import { processResumeWithFlask } from './utils/flaskAiClient.js';
 
-const pool = require('./config/db');
-const authRoutes = require('./routes/authRoutes');
-const offersRoutes = require("./routes/offersRoutes");
-const applicationsRoutes = require("./routes/applicationsRoutes");
+import pool from './config/db.js';
+import authRoutes from './routes/authRoutes.js';
+import offersRoutes from './routes/offersRoutes.js';
+import candidateApplicationsRoutes from './routes/candidateApplicationsRoutes.js';
+import managerApplicationsRoutes from './routes/managerApplicationsRoutes.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: 'http://localhost:5173',
+  credentials: true,
+}));
 app.use(express.json());
 
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
@@ -22,7 +30,8 @@ app.get('/api/health', (req, res) => {
 });
 app.use("/api/offers", offersRoutes);
 app.use('/api/auth', authRoutes);
-app.use('/api/applications', applicationsRoutes);
+app.use('/api/candidate/applications', candidateApplicationsRoutes);
+app.use('/api/manager/applications', managerApplicationsRoutes);
 
 app.get('/api/pdf-extract', async (req, res) => {
   try {
@@ -51,7 +60,7 @@ Requirements:
 - Bonus: experience in international multi-sport event logistics (Olympics, continental championships)`;
 
     // Replace with actual job description fetched from MySQL
-    const result = await processResume('uploads/CV_ZAIDAHMEDYASSINE.pdf', jobDescriptionFromMySQL);
+    const result = await processResumeWithFlask('uploads/CV_ZAIDAHMEDYASSINE.pdf', jobDescriptionFromMySQL);
     res.json({ status: 'ok', result });
   } catch (error) {
     console.error('Error extracting PDF:', error);
@@ -63,7 +72,7 @@ const PORT = process.env.PORT || 5000;
 
 pool.query('SELECT 1')
   .then(() => {
-    console.log('Connexion MySQL OK');
+    console.log('Connexion PostgreSQL OK');
     app.listen(PORT, () => {
       console.log(`Backend running on http://localhost:${PORT}`);
     });

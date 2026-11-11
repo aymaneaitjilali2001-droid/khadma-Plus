@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "description": "Backend API - Plateforme de recrutement IA",
   "main": "src/server.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "db:seed": "node src/db/seed.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -15,10 +16,10 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.0",
-    "mysql2": "^3.11.0",
     "openai": "^6.47.0",
     "pdf-lib": "^1.17.1",
-    "pdf-to-png-converter": "^4.1.1"
+    "pdf-to-png-converter": "^4.1.1",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

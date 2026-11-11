@@ -1,8 +1,21 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const pool = require('../config/db');
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import pool from '../config/db.js';
 
 const TOKEN_EXPIRY = '7d';
+const COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
+
+function setAuthCookie(res, token) {
+  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `token=${encodeURIComponent(token)}; Max-Age=${COOKIE_MAX_AGE / 1000}; Path=/; HttpOnly; SameSite=Lax${secure}`
+  );
+}
+
+function clearAuthCookie(res) {
+  res.setHeader('Set-Cookie', 'token=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax');
+}
 
 function signToken(user) {
   return jwt.sign(
@@ -39,7 +52,8 @@ async function register(req, res) {
 
     const user = { id: result.insertId, email, role, full_name };
     const token = signToken(user);
-    res.status(201).json({ token, user });
+    setAuthCookie(res, token);
+    res.status(201).json({ user });
   } catch (err) {
     console.error('Erreur register:', err);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -70,7 +84,8 @@ async function login(req, res) {
 
     const user = { id: dbUser.id, email: dbUser.email, role: dbUser.role, full_name: dbUser.full_name };
     const token = signToken(user);
-    res.json({ token, user });
+    setAuthCookie(res, token);
+    res.json({ user });
   } catch (err) {
     console.error('Erreur login:', err);
     res.status(500).json({ error: 'Erreur serveur' });
@@ -93,4 +108,9 @@ async function me(req, res) {
   }
 }
 
-module.exports = { register, login, me };
+function logout(req, res) {
+  clearAuthCookie(res);
+  res.json({ message: 'Déconnexion réussie' });
+}
+
+export { register, login, me, logout };

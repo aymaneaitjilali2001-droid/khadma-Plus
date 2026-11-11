@@ -1,577 +1,155 @@
-import { useEffect, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import useSWR from 'swr';
+import {
+  Activity, ArrowLeft, BriefcaseBusiness, CheckCircle2, ChevronRight,
+  ClipboardList, FileText, LayoutDashboard, LogOut, Menu, Plus,
+  Search, Sparkles, Users, X, MapPin, Pencil, Eye, LoaderCircle,
+} from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import apiClient from '../api/client';
+import apiClient, { fetcher } from '../api/client';
 import JobForm from './JobForm';
 import AIEvaluationModal from '../components/AIEvaluationModal';
 
-const funnelData = [
-  { name: 'Sourcing', candidats: 145, pourcentage: 100 },
-  { name: 'Tri CV', candidats: 92, pourcentage: 63 },
-  { name: 'Entretiens', candidats: 48, pourcentage: 33 },
-  { name: 'Offres', candidats: 12, pourcentage: 8 },
-  { name: 'Embauches', candidats: 6, pourcentage: 4 },
-];
+const STATUSES = ['Tous', 'Pas encore traité', 'Accepté', 'Refusé'];
+const statusClasses = {
+  'Accepté': 'bg-emerald-50 text-emerald-700 ring-emerald-200',
+  'Refusé': 'bg-rose-50 text-rose-700 ring-rose-200',
+  'Pas encore traité': 'bg-amber-50 text-amber-700 ring-amber-200',
+};
+const normalize = (value) => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const initials = (name) => String(name || '?').trim().split(/\s+/).slice(0, 2).map((s) => s[0]?.toUpperCase()).join('');
+const dateLabel = (value) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+};
 
-function initialsOf(fullName) {
-  return fullName
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0].toUpperCase())
-    .join('');
+function StatusBadge({ status }) {
+  return <span className={`inline-flex whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusClasses[status] || 'bg-slate-50 text-slate-600 ring-slate-200'}`}>{status || '—'}</span>;
 }
-
-function getStatutStyle(statut) {
-  switch (statut) {
-    case 'Accepté': return 'bg-green-100 text-green-800';
-    case 'Refusé': return 'bg-red-100 text-red-800';
-    case 'Pas encore traité': return 'bg-yellow-100 text-yellow-800';
-    default: return 'bg-gray-100 text-gray-800';
-  }
+function EmptyState({ children }) {
+  return <div className="rounded-2xl border border-dashed border-slate-200 bg-white px-6 py-14 text-center text-sm text-slate-500">{children}</div>;
 }
 
 export default function DashboardRH() {
   const { user, logout } = useAuth();
   const [activeMenu, setActiveMenu] = useState('dashboard');
-
-  // États pour la recherche et le filtre global de l'onglet candidats
+  const [mobileMenu, setMobileMenu] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [filtreStatut, setFiltreStatut] = useState('Tous');
-  const [filtreJob, setFiltreJob] = useState(null); // { id, title } | null
-
-  // États pour la gestion des offres d'emploi
-  const [jobView, setJobView] = useState('list'); // 'list' | 'create' | 'edit'
+  const [filtreJob, setFiltreJob] = useState(null);
+  const [jobView, setJobView] = useState('list');
   const [selectedJob, setSelectedJob] = useState(null);
-  const [jobs, setJobs] = useState([]);
-  const [candidatures, setCandidatures] = useState([]);
   const [aiEvaluating, setAiEvaluating] = useState(new Set());
   const [aiResult, setAiResult] = useState(null);
-  const [loadingData, setLoadingData] = useState(true);
+  const [busyStatuses, setBusyStatuses] = useState(new Set());
+  const [notice, setNotice] = useState('');
 
-  const firstName = user.full_name.split(' ')[0];
+  const { data: jobsData, error: jobsError, isLoading: jobsLoading, mutate: mutateJobs } = useSWR('/offers/mine', fetcher);
+  const { data: appsData, error: appsError, isLoading: appsLoading, mutate: mutateCandidatures } = useSWR('/manager/applications', fetcher);
+  const jobs = Array.isArray(jobsData) ? jobsData : [];
+  const candidatures = Array.isArray(appsData) ? appsData : [];
+  const filteredJobs = useMemo(() => jobs.filter((job) => normalize([job.title, job.company, job.location, job.contract].join(' ')).includes(normalize(searchTerm.trim()))), [jobs, searchTerm]);
+  const filteredCandidatures = useMemo(() => candidatures.filter((c) => {
+    const text = normalize([c.prenom, c.nom, c.email, c.job_title, c.job_company].join(' '));
+    return text.includes(normalize(searchTerm.trim())) && (filtreStatut === 'Tous' || c.statut === filtreStatut) && (!filtreJob || String(c.job_id) === String(filtreJob.id));
+  }), [candidatures, searchTerm, filtreStatut, filtreJob]);
+  const pending = candidatures.filter((c) => c.statut === 'Pas encore traité').length;
+  const accepted = candidatures.filter((c) => c.statut === 'Accepté').length;
+  const published = jobs.filter((j) => j.status === 'published').length;
+  const firstName = String(user?.full_name || 'Recruteur').split(' ')[0];
 
-  useEffect(() => {
-    Promise.all([
-      apiClient.get('/offers').then(({ data }) => setJobs(data)),
-      apiClient.get('/applications').then(({ data }) => setCandidatures(data)),
-    ]).finally(() => setLoadingData(false));
-  }, [user.id]);
-
-  // Déclencher l'édition d'un job
-  const handleEditClick = (job) => {
-    setSelectedJob(job);
-    setJobView('edit');
-  };
-
-  const handleStatutChange = (applicationId, statut) => {
-    const previousStatut = candidatures.find((c) => c.id === applicationId)?.statut;
-    setCandidatures((prev) => prev.map((c) => (c.id === applicationId ? { ...c, statut } : c)));
-    apiClient.patch(`/applications/${applicationId}/statut`, { statut }).catch(() => {
-      setCandidatures((prev) => prev.map((c) => (c.id === applicationId ? { ...c, statut: previousStatut } : c)));
-    });
-  };
-
-  const handleEvaluate = async (candidat) => {
-    setAiEvaluating((prev) => new Set(prev).add(candidat.id));
+  function switchMenu(menu) {
+    setActiveMenu(menu);
+    setMobileMenu(false);
+    setSearchTerm('');
+    setNotice('');
+    if (menu === 'offres') setJobView('list');
+    if (menu === 'candidats') setFiltreJob(null);
+  }
+  async function handleStatutChange(applicationId, statut) {
+    setNotice('');
+    setBusyStatuses((prev) => new Set(prev).add(applicationId));
+    const oldData = candidatures;
+    await mutateCandidatures(oldData.map((c) => c.id === applicationId ? { ...c, statut } : c), { revalidate: false });
     try {
-      const { data } = await apiClient.post(`/applications/${candidat.id}/evaluate`);
-      setCandidatures((prev) =>
-        prev.map((c) =>
-          c.id === candidat.id
-            ? { ...c, ai_score: data.score, ai_decision: data.accepted, ai_reasons: data.reasons, ai_summary: data.summary }
-            : c
-        )
-      );
-      setAiResult({
-        candidateName: `${candidat.prenom} ${candidat.nom}`,
-        jobTitle: candidat.job_title,
-        score: data.score,
-        accepted: data.accepted,
-        reasons: data.reasons,
-        summary: data.summary,
-      });
+      await apiClient.patch(`/manager/applications/${applicationId}/statut`, { statut });
+      await mutateCandidatures();
     } catch (err) {
-      alert(err.response?.data?.error || "Erreur lors de l'analyse IA");
+      await mutateCandidatures(oldData, { revalidate: false });
+      setNotice(err.response?.data?.error || 'Impossible de modifier le statut. Réessayez.');
     } finally {
-      setAiEvaluating((prev) => {
-        const next = new Set(prev);
-        next.delete(candidat.id);
-        return next;
-      });
+      setBusyStatuses((prev) => { const next = new Set(prev); next.delete(applicationId); return next; });
     }
-  };
-
-  const showCachedResult = (candidat) => {
-    setAiResult({
-      candidateName: `${candidat.prenom} ${candidat.nom}`,
-      jobTitle: candidat.job_title,
-      score: candidat.ai_score,
-      accepted: candidat.ai_decision,
-      reasons: candidat.ai_reasons || [],
-      summary: candidat.ai_summary,
-    });
-  };
-
-  // Filtrage dynamique pour l'onglet Candidats
-  const filteredCandidatures = candidatures.filter((candidat) => {
-    const fullName = `${candidat.prenom} ${candidat.nom}`;
-    const matchesSearch =
-      fullName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      candidat.job_title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      candidat.job_company.toLowerCase().includes(searchTerm.toLowerCase());
-
-    const matchesStatut = filtreStatut === 'Tous' || candidat.statut === filtreStatut;
-    const matchesJob = !filtreJob || candidat.job_id === filtreJob.id;
-
-    return matchesSearch && matchesStatut && matchesJob;
-  });
-
-  return (
-    <div className="flex h-screen bg-gray-50 font-sans text-gray-800 overflow-hidden">
-
-      {/* 1. BARRE LATÉRALE (SIDEBAR) */}
-      <aside className="w-64 bg-white border-r border-gray-200 flex-col justify-between hidden md:flex">
-        <div>
-          <Link to="/" className="p-6 flex items-center gap-3 border-b border-gray-100 hover:bg-gray-50 transition-colors">
-            <div className="h-9 w-9 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold text-xl">
-              H
-            </div>
-            <span className="font-bold text-xl tracking-tight text-gray-900">HirePulse</span>
-          </Link>
-
-          <nav className="p-4 space-y-1">
-            <button
-              onClick={() => setActiveMenu('dashboard')}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${activeMenu === 'dashboard' ? 'bg-indigo-50 text-indigo-600' : 'text-gray-600 hover:bg-gray-50'}`}
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v4a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
-              Tableau de bord
-            </button>
-            <button
-              onClick={() => {
-                setActiveMenu('offres');
-                setJobView('list'); // Réinitialise sur la liste des offres
-              }}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${activeMenu === 'offres' ? 'bg-indigo-50 text-indigo-600' : 'text-gray-600 hover:bg-gray-50'}`}
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
-              Offres d'emploi
-            </button>
-          </nav>
-        </div>
-
-        {/* Profil connecté */}
-        <div className="p-4 border-t border-gray-100 flex items-center gap-3">
-          <div className="h-10 w-10 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-semibold shrink-0">
-            {initialsOf(user.full_name)}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-semibold text-gray-900 truncate">{user.full_name}</p>
-            <p className="text-xs text-gray-500">{user.role === 'manager' ? 'Recruteur' : 'Candidat'}</p>
-          </div>
-          <button
-            onClick={logout}
-            title="Se déconnecter"
-            className="p-2 text-gray-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-          </button>
-        </div>
-      </aside>
-
-      {/* ZONE DE CONTENU PRINCIPALE */}
-      <div className="flex-1 flex flex-col overflow-y-auto">
-
-        {/* 2. EN-TÊTE (HEADER) */}
-        <header className="h-16 bg-white border-b border-gray-200 px-8 flex items-center justify-between sticky top-0 z-10">
-          <div className="relative w-80">
-            <span className="absolute left-3 top-2.5 text-gray-400">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-            </span>
-            <input
-              type="text"
-              placeholder="Rechercher un candidat, un poste..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-indigo-500 transition-colors"
-            />
-          </div>
-          <div className="flex items-center gap-4">
-            <button className="p-2 text-gray-400 hover:text-gray-600 relative bg-gray-50 rounded-full">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path></svg>
-              <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full"></span>
-            </button>
-          </div>
-        </header>
-
-        {/* 3. CORPS DU DASHBOARD */}
-        <main className="p-8 max-w-7xl w-full mx-auto space-y-8">
-
-          {/* VUE 1 : DASHBOARD PRINCIPAL */}
-          {activeMenu === 'dashboard' && (
-            <>
-              <div>
-                <h1 className="text-2xl font-bold text-gray-950">Bonjour {firstName} 👋</h1>
-                <p className="text-gray-500 text-sm mt-1">Voici le suivi de vos recrutements pour aujourd'hui.</p>
-              </div>
-
-              {/* Cartes de statistiques (KPI Cards) */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                <div className="bg-white p-5 rounded-xl border border-gray-200 flex items-start justify-between shadow-sm">
-                  <div className="space-y-2">
-                    <span className="text-sm text-gray-500 font-medium">Offres actives</span>
-                    <p className="text-2xl font-bold">{jobs.length}</p>
-                    <span className="text-xs text-green-600 font-medium flex items-center gap-1">↑ +2 cette semaine</span>
-                  </div>
-                  <div className="p-3 bg-blue-50 text-blue-600 rounded-lg">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
-                  </div>
-                </div>
-
-                <div className="bg-white p-5 rounded-xl border border-gray-200 flex items-start justify-between shadow-sm">
-                  <div className="space-y-2">
-                    <span className="text-sm text-gray-500 font-medium">Candidatures reçues</span>
-                    <p className="text-2xl font-bold">{candidatures.length}</p>
-                  </div>
-                  <div className="p-3 bg-purple-50 text-purple-600 rounded-lg">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                {/* Candidats récents réels et dynamiques */}
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                  <div className="p-6 pb-0 flex items-center justify-between">
-                    <h2 className="font-semibold text-gray-900">Candidats récents</h2>
-                  </div>
-                  {candidatures.length === 0 ? (
-                    <p className="text-sm text-gray-400 px-6 py-8 text-center">Aucune candidature pour le moment.</p>
-                  ) : (
-                    <ul className="divide-y divide-gray-100 mt-4">
-                      {candidatures.slice(0, 4).map((candidat) => (
-                        <li key={candidat.id} className="flex items-center gap-4 px-6 py-4 hover:bg-gray-50/40 transition-colors">
-                          <div className="h-10 w-10 rounded-full bg-indigo-50 text-indigo-700 flex items-center justify-center font-semibold shrink-0">
-                            {initialsOf(`${candidat.prenom} ${candidat.nom}`)}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-gray-900 truncate">{candidat.prenom} {candidat.nom}</p>
-                            <p className="text-xs text-gray-500 truncate">
-                              {candidat.job_title} • <span className="font-semibold text-gray-400">{candidat.job_company}</span>
-                            </p>
-                          </div>
-                          <span className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${getStatutStyle(candidat.statut)}`}>
-                            {candidat.statut}
-                          </span>
-                          <span className="text-xs text-gray-400 whitespace-nowrap hidden sm:block">
-                            {new Date(candidat.applied_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* VUE 2 : ONGLETS DES OFFRES D'EMPLOI */}
-          {activeMenu === 'offres' && (
-            <div className="space-y-6">
-              
-              {/* --- SOUS-VUE : LISTE DES OFFRES --- */}
-              {jobView === 'list' && (
-                <div>
-                  {/* Titre et Bouton de Création en haut à droite */}
-                  <div className="flex justify-between items-center mb-6">
-                    <div>
-                      <h1 className="text-2xl font-bold text-gray-950">Offres d'emploi</h1>
-                      <p className="text-gray-500 text-sm mt-1">Gérez vos publications de postes.</p>
-                    </div>
-                    <button
-                      onClick={() => setJobView('create')}
-                      className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2.5 rounded-lg shadow-sm transition-colors flex items-center gap-2"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
-                      Créer une offre
-                    </button>
-                  </div>
-
-                  {/* Tableau des offres */}
-                  <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                    <table className="w-full border-collapse text-left text-sm text-gray-500">
-                      <thead className="bg-gray-50 text-gray-700 uppercase text-xs font-semibold border-b border-gray-200">
-                        <tr>
-                          <th className="px-6 py-4 font-medium">Poste</th>
-                          <th className="px-6 py-4 font-medium">Entreprise</th>
-                          <th className="px-6 py-4 font-medium">Localisation</th>
-                          <th className="px-6 py-4 font-medium text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100">
-                        {loadingData ? (
-                          <tr>
-                            <td colSpan="4" className="px-6 py-10 text-center text-gray-400">Chargement des offres...</td>
-                          </tr>
-                        ) : jobs.length === 0 ? (
-                          <tr>
-                            <td colSpan="4" className="px-6 py-10 text-center text-gray-400">
-                              Aucune offre pour le moment — clique sur "Créer une offre" pour commencer.
-                            </td>
-                          </tr>
-                        ) : (
-                          jobs.map((job) => (
-                            <tr key={job.id} className="hover:bg-gray-50/50 transition-colors">
-                              <td className="px-6 py-4">
-                                <span className="font-semibold text-gray-900 block">{job.title}</span>
-                                <span className="text-xs text-indigo-600 font-medium bg-indigo-50 px-2 py-0.5 rounded-full inline-block mt-1">
-                                  {job.contract}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 text-gray-600">{job.company}</td>
-                              <td className="px-6 py-4 text-gray-500">{job.location}</td>
-                              <td className="px-6 py-4 text-right">
-                                <div className="flex items-center justify-end gap-3">
-                                  {/* Bouton Voir candidatures */}
-                                  <button
-                                    onClick={() => {
-                                      setActiveMenu('candidats');
-                                      setSearchTerm('');
-                                      setFiltreJob({ id: job.id, title: job.title });
-                                    }}
-                                    className="text-xs font-semibold text-gray-700 bg-gray-50 hover:bg-gray-100 border border-gray-200 px-3 py-2 rounded-lg transition-colors"
-                                  >
-                                    Voir candidature
-                                  </button>
-                                  {/* Bouton Edit */}
-                                  <button
-                                    onClick={() => handleEditClick(job)}
-                                    className="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-lg transition-colors"
-                                  >
-                                    Edit
-                                  </button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* --- SOUS-VUE : CRÉER UNE OFFRE --- */}
-              {jobView === 'create' && (
-                <div>
-                  <button
-                    onClick={() => setJobView('list')}
-                    className="mb-6 inline-flex items-center gap-2 text-sm text-indigo-600 font-medium hover:underline"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-                    Retour aux offres
-                  </button>
-                  <JobForm 
-                    onCancel={() => setJobView('list')} 
-                    onSubmitSuccess={(newJob) => {
-                      setJobs(prev => [...prev, newJob]);
-                      setJobView('list');
-                    }}
-                  />
-                </div>
-              )}
-
-              {/* --- SOUS-VUE : ÉDITER UNE OFFRE --- */}
-              {jobView === 'edit' && (
-                <div>
-                  <button
-                    onClick={() => {
-                      setJobView('list');
-                      setSelectedJob(null);
-                    }}
-                    className="mb-6 inline-flex items-center gap-2 text-sm text-indigo-600 font-medium hover:underline"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-                    Retour aux offres
-                  </button>
-                  <JobForm 
-                    initialData={selectedJob} 
-                    onCancel={() => {
-                      setJobView('list');
-                      setSelectedJob(null);
-                    }} 
-                    onSubmitSuccess={(updatedJob) => {
-                      setJobs(prev => prev.map(item => item.id === selectedJob.id ? updatedJob : item));
-                      setSelectedJob(null);
-                      setJobView('list');
-                    }}
-                  />
-                </div>
-              )}
-
-            </div>
-          )}
-
-          {/* VUE 3 : INTERFACE DE GESTION DES CANDIDATS (TABLEAU + FILTRES + RECHERCHE) */}
-          {activeMenu === 'candidats' && (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div>
-                  <h1 className="text-2xl font-bold text-gray-950">Suivi des Candidatures</h1>
-                  <p className="text-gray-500 text-sm mt-1">Consultez l'état d'avancement des profils postulants.</p>
-                </div>
-                {filtreJob && (
-                  <div className="flex items-center gap-2 text-sm bg-indigo-50 text-indigo-700 px-3 py-1.5 rounded-lg">
-                    <span>Filtré par : <strong>{filtreJob.title}</strong></span>
-                    <button
-                      onClick={() => setFiltreJob(null)}
-                      className="text-indigo-500 hover:text-indigo-800 font-bold"
-                      title="Retirer le filtre"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-                {/* Barre de recherche et de filtres */}
-                <div className="p-6 border-b border-gray-200 flex flex-col sm:flex-row gap-4 justify-between items-center bg-gray-50/50">
-                  <div className="relative w-full sm:w-80">
-                    <span className="absolute left-3 top-2.5 text-gray-400">
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                      </svg>
-                    </span>
-                    <input
-                      type="text"
-                      placeholder="Rechercher un candidat, poste..."
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:border-indigo-500 transition-colors"
-                    />
-                  </div>
-
-                  <div className="flex gap-2 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0">
-                    {['Tous', 'Pas encore traité', 'Accepté', 'Refusé'].map((statut) => (
-                      <button
-                        key={statut}
-                        onClick={() => setFiltreStatut(statut)}
-                        className={`px-4 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors border ${
-                          filtreStatut === statut
-                            ? 'bg-indigo-600 border-indigo-600 text-white'
-                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-                        }`}
-                      >
-                        {statut}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Tableau principal des candidats */}
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse text-left text-sm text-gray-500">
-                    <thead className="bg-gray-50 text-gray-700 uppercase text-xs font-semibold border-b border-gray-200">
-                      <tr>
-                        <th className="px-6 py-4 font-medium">Candidat</th>
-                        <th className="px-6 py-4 font-medium">Poste visé</th>
-                        <th className="px-6 py-4 font-medium">Entreprise</th>
-                        <th className="px-6 py-4 font-medium">Date d'application</th>
-                        <th className="px-6 py-4 font-medium">CV</th>
-                        <th className="px-6 py-4 font-medium">Analyse IA</th>
-                        <th className="px-6 py-4 font-medium text-center">Statut</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {loadingData ? (
-                        <tr>
-                          <td colSpan="7" className="px-6 py-10 text-center text-gray-400">Chargement des candidatures...</td>
-                        </tr>
-                      ) : filteredCandidatures.length > 0 ? (
-                        filteredCandidatures.map((candidat) => (
-                          <tr key={candidat.id} className="hover:bg-gray-50/50 transition-colors">
-                            <td className="px-6 py-4 flex items-center gap-3">
-                              <div className="h-9 w-9 rounded-full bg-indigo-50 text-indigo-700 flex items-center justify-center font-semibold shrink-0 text-sm">
-                                {initialsOf(`${candidat.prenom} ${candidat.nom}`)}
-                              </div>
-                              <div className="min-w-0">
-                                <span className="font-semibold text-gray-900 block truncate">{candidat.prenom} {candidat.nom}</span>
-                                <span className="text-xs text-gray-400 block truncate">{candidat.email}</span>
-                              </div>
-                            </td>
-                            <td className="px-6 py-4 text-gray-600 font-medium">{candidat.job_title}</td>
-                            <td className="px-6 py-4 text-gray-500">{candidat.job_company}</td>
-                            <td className="px-6 py-4 text-gray-400">
-                              {new Date(candidat.applied_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' })}
-                            </td>
-                            <td className="px-6 py-4">
-                              {candidat.resume_path ? (
-                                <a
-                                  href={`http://localhost:5000${candidat.resume_path}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-indigo-600 font-semibold text-xs hover:underline"
-                                >
-                                  Voir le CV
-                                </a>
-                              ) : (
-                                <span className="text-xs text-gray-300">—</span>
-                              )}
-                            </td>
-                            <td className="px-6 py-4">
-                              {aiEvaluating.has(candidat.id) ? (
-                                <span className="text-xs text-gray-400">Analyse en cours...</span>
-                              ) : candidat.ai_score !== null && candidat.ai_score !== undefined ? (
-                                <button
-                                  onClick={() => showCachedResult(candidat)}
-                                  className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full transition-opacity hover:opacity-80 ${candidat.ai_decision ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}
-                                >
-                                  {candidat.ai_decision ? '✅' : '❌'} Score {candidat.ai_score}/100
-                                </button>
-                              ) : candidat.resume_path && candidat.resume_path.toLowerCase().endsWith('.pdf') ? (
-                                <button
-                                  onClick={() => handleEvaluate(candidat)}
-                                  className="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
-                                >
-                                  Analyser avec l'IA
-                                </button>
-                              ) : (
-                                <span className="text-xs text-gray-300">CV PDF requis</span>
-                              )}
-                            </td>
-                            <td className="px-6 py-4 text-center">
-                              <select
-                                value={candidat.statut}
-                                onChange={(e) => handleStatutChange(candidat.id, e.target.value)}
-                                className={`text-xs font-semibold px-2.5 py-1 rounded-full border-0 outline-none cursor-pointer ${getStatutStyle(candidat.statut)}`}
-                              >
-                                <option value="Pas encore traité">Pas encore traité</option>
-                                <option value="Accepté">Accepté</option>
-                                <option value="Refusé">Refusé</option>
-                              </select>
-                            </td>
-                          </tr>
-                        ))
-                      ) : (
-                        <tr>
-                          <td colSpan="7" className="px-6 py-10 text-center text-gray-400">
-                            Aucun candidat trouvé pour ces critères de recherche.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* VUES TEMPORAIRES POUR AUTRES ONGLETS */}
-
-        </main>
-      </div>
-
-      <AIEvaluationModal result={aiResult} onClose={() => setAiResult(null)} />
+  }
+  function resultFrom(c, data) {
+    return { candidateName: `${c.prenom || ''} ${c.nom || ''}`.trim(), jobTitle: c.job_title, score: data.score, accepted: data.accepted, reasons: data.reasons || [], summary: data.summary };
+  }
+  async function handleEvaluate(c) {
+    setNotice('');
+    setAiEvaluating((prev) => new Set(prev).add(c.id));
+    try {
+      const { data } = await apiClient.post(`/manager/applications/${c.id}/evaluate`);
+      setAiResult(resultFrom(c, data));
+      await mutateCandidatures();
+    } catch (err) {
+      setNotice(err.response?.data?.error || "Erreur lors de l'analyse IA.");
+    } finally {
+      setAiEvaluating((prev) => { const next = new Set(prev); next.delete(c.id); return next; });
+    }
+  }
+  const navItems = [
+    { id: 'dashboard', label: 'Vue d’ensemble', icon: LayoutDashboard },
+    { id: 'offres', label: "Offres d’emploi", icon: BriefcaseBusiness },
+    { id: 'candidats', label: 'Candidatures', icon: Users },
+  ];
+  const nav = <>
+    <Link to="/" className="flex items-center gap-3 px-5 py-6 text-white">
+      <span className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg shadow-violet-900/30"><BriefcaseBusiness size={23} /></span>
+      <span className="text-xl font-extrabold tracking-tight">Khadma <span className="text-violet-300">Plus</span></span>
+    </Link>
+    <div className="px-4 pt-7"><p className="px-3 pb-3 text-[11px] font-bold uppercase tracking-[.2em] text-slate-500">Espace recruteur</p>
+      <nav className="space-y-2" aria-label="Navigation du dashboard">{navItems.map(({ id, label, icon: Icon }) => (
+        <button key={id} type="button" onClick={() => switchMenu(id)} className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left text-sm font-semibold transition ${activeMenu === id ? 'bg-violet-600 text-white shadow-lg shadow-violet-950/30' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}><Icon size={19} />{label}<ChevronRight size={15} className="ml-auto opacity-60" /></button>
+      ))}</nav>
     </div>
-  );
+    <div className="mt-auto border-t border-white/10 p-4"><div className="flex items-center gap-3 rounded-2xl bg-white/5 p-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-violet-500/30 font-bold text-violet-100">{initials(user?.full_name)}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-white">{user?.full_name || 'Recruteur'}</p><p className="text-xs text-slate-400">Recruteur</p></div><button type="button" aria-label="Déconnexion" title="Déconnexion" onClick={logout} className="rounded-lg p-2 text-slate-300 hover:bg-white/10 hover:text-white"><LogOut size={18} /></button></div></div>
+  </>;
+
+  return <div className="min-h-screen bg-[#f5f6fc] font-sans text-slate-900 md:flex">
+    <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col bg-[#080e29] md:flex">{nav}</aside>
+    {mobileMenu && <div className="fixed inset-0 z-50 md:hidden"><button className="absolute inset-0 bg-slate-950/60" aria-label="Fermer le menu" onClick={() => setMobileMenu(false)} /><aside className="relative flex h-full w-72 flex-col bg-[#080e29]">{nav}<button onClick={() => setMobileMenu(false)} className="absolute right-3 top-3 rounded-lg p-2 text-white" aria-label="Fermer"><X size={20}/></button></aside></div>}
+    <div className="min-w-0 flex-1">
+      <header className="sticky top-0 z-20 flex h-[76px] items-center justify-between gap-4 border-b border-slate-200/80 bg-white/90 px-4 backdrop-blur-xl sm:px-8">
+        <div className="flex items-center gap-3"><button type="button" onClick={() => setMobileMenu(true)} className="rounded-lg p-2 text-slate-700 md:hidden" aria-label="Ouvrir le menu"><Menu size={23}/></button><div><p className="text-xs font-medium text-slate-400">Khadma Plus / Recrutement</p><p className="text-sm font-bold text-slate-800">{navItems.find((n) => n.id === activeMenu)?.label}</p></div></div>
+        <div className="flex items-center gap-3"><span className="hidden rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 sm:inline-flex"><span className="mr-2 h-2 w-2 rounded-full bg-emerald-500"/>Espace RH</span><span className="grid h-10 w-10 place-items-center rounded-full bg-violet-100 text-sm font-bold text-violet-700">{initials(user?.full_name)}</span></div>
+      </header>
+      <main className="mx-auto max-w-7xl space-y-7 px-4 py-7 sm:px-8 sm:py-9">
+        {notice && <div role="alert" className="flex items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{notice}<button onClick={() => setNotice('')} aria-label="Fermer l'alerte"><X size={17}/></button></div>}
+        {activeMenu === 'dashboard' && <>
+          <section className="relative overflow-hidden rounded-[28px] bg-gradient-to-r from-[#111a4c] via-[#28206a] to-[#5a28b8] p-7 text-white shadow-xl shadow-violet-200/60 sm:p-9"><div className="absolute -right-10 -top-20 h-64 w-64 rounded-full border-[35px] border-white/5"/><div className="relative"><div className="mb-4 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5 text-xs font-semibold text-violet-100"><Sparkles size={14}/> Votre espace de recrutement</div><h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">Bonjour {firstName} 👋</h1><p className="mt-2 max-w-xl text-sm leading-6 text-indigo-100">Suivez vos offres, consultez les candidatures et avancez dans vos recrutements depuis un seul espace.</p><button type="button" onClick={() => { setActiveMenu('offres'); setJobView('create'); }} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2.5 text-sm font-bold text-violet-700 shadow-lg transition hover:bg-violet-50"><Plus size={17}/> Créer une offre</button></div></section>
+          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Statistiques de recrutement">{[
+            { label: 'Offres publiées', value: published, icon: BriefcaseBusiness, color: 'bg-indigo-50 text-indigo-600' },
+            { label: 'Candidatures reçues', value: candidatures.length, icon: Users, color: 'bg-violet-50 text-violet-600' },
+            { label: 'À traiter', value: pending, icon: ClipboardList, color: 'bg-amber-50 text-amber-600' },
+            { label: 'Acceptées', value: accepted, icon: CheckCircle2, color: 'bg-emerald-50 text-emerald-600' },
+          ].map(({ label, value, icon: Icon, color }) => <div key={label} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><p className="text-sm font-medium text-slate-500">{label}</p><span className={`rounded-xl p-2.5 ${color}`}><Icon size={20}/></span></div><p className="mt-3 text-3xl font-extrabold tracking-tight">{jobsLoading || appsLoading ? '…' : value}</p></div>)}</section>
+          {(jobsError || appsError) && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">Certaines statistiques n’ont pas pu être chargées.</div>}
+          <section className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-6 py-5"><div><h2 className="text-lg font-bold">Candidatures récentes</h2><p className="mt-1 text-xs text-slate-500">Dernières candidatures reçues</p></div><button onClick={() => switchMenu('candidats')} className="inline-flex items-center gap-2 text-sm font-bold text-violet-700 hover:underline">Tout consulter <ChevronRight size={16}/></button></div>{appsLoading ? <p className="p-8 text-sm text-slate-500">Chargement…</p> : appsError ? <p className="p-8 text-sm text-rose-600">Impossible de charger les candidatures.</p> : candidatures.length === 0 ? <p className="p-8 text-sm text-slate-500">Aucune candidature pour le moment.</p> : <div className="divide-y divide-slate-100">{[...candidatures].sort((a,b) => new Date(b.applied_at || 0) - new Date(a.applied_at || 0)).slice(0,5).map((c) => <div key={c.id} className="flex flex-wrap items-center gap-3 px-6 py-4"><span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-violet-100 text-sm font-bold text-violet-700">{initials(`${c.prenom || ''} ${c.nom || ''}`)}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{c.prenom} {c.nom}</p><p className="truncate text-xs text-slate-500">{c.job_title} · {c.job_company}</p></div><StatusBadge status={c.statut}/><span className="hidden text-xs text-slate-400 sm:block">{dateLabel(c.applied_at)}</span></div>)}</div>}</section>
+        </>}
+        {activeMenu === 'offres' && <>
+          {jobView === 'list' ? <><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-bold uppercase tracking-[.18em] text-violet-600">Gestion des postes</p><h1 className="mt-1 text-2xl font-extrabold">Offres d’emploi</h1><p className="mt-1 text-sm text-slate-500">Gérez vos publications et leurs candidatures.</p></div><button onClick={() => { setSelectedJob(null); setJobView('create'); }} className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-violet-200 hover:bg-violet-700"><Plus size={18}/> Créer une offre</button></div>
+            <div className="relative"><Search size={19} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"/><input aria-label="Rechercher une offre" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Rechercher un poste, une entreprise, une ville…" className="w-full rounded-xl border border-slate-200 bg-white py-3 pl-11 pr-4 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"/></div>
+            {jobsLoading ? <EmptyState>Chargement des offres…</EmptyState> : jobsError ? <EmptyState>Impossible de charger les offres. Réessayez plus tard.</EmptyState> : filteredJobs.length === 0 ? <EmptyState>Aucune offre trouvée.</EmptyState> : <div className="grid gap-4 lg:grid-cols-2">{filteredJobs.map((job) => <article key={job.id} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg"><div className="flex items-start gap-3"><span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-700 font-bold text-white">{initials(job.company).slice(0,1)}</span><div className="min-w-0 flex-1"><h2 className="truncate font-bold">{job.title}</h2><p className="mt-1 text-sm text-slate-500">{job.company}</p></div><span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-bold text-violet-700">{job.contract || '—'}</span></div><p className="mt-5 flex items-center gap-2 text-sm text-slate-500"><MapPin size={16} className="text-violet-600"/>{job.location || 'Non précisé'}</p><div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4"><button onClick={() => { setActiveMenu('candidats'); setFiltreJob({ id: job.id, title: job.title }); setFiltreStatut('Tous'); setSearchTerm(''); }} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-violet-600 px-3 py-2.5 text-xs font-bold text-white hover:bg-violet-700"><Eye size={16}/> Candidatures</button><button onClick={() => { setSelectedJob(job); setJobView('edit'); }} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-50"><Pencil size={15}/> Modifier</button></div></article>)}</div>}</> : <><button onClick={() => { setJobView('list'); setSelectedJob(null); }} className="inline-flex items-center gap-2 text-sm font-bold text-violet-700 hover:underline"><ArrowLeft size={17}/> Retour aux offres</button><div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-7"><h1 className="mb-5 text-xl font-bold">{jobView === 'create' ? 'Créer une offre' : 'Modifier une offre'}</h1><JobForm initialData={jobView === 'edit' ? selectedJob : undefined} onCancel={() => { setJobView('list'); setSelectedJob(null); }} onSubmitSuccess={async () => { await mutateJobs(); setJobView('list'); setSelectedJob(null); }}/></div></>}
+        </>}
+        {activeMenu === 'candidats' && <><div><p className="text-xs font-bold uppercase tracking-[.18em] text-violet-600">Gestion des talents</p><h1 className="mt-1 text-2xl font-extrabold">Suivi des candidatures</h1><p className="mt-1 text-sm text-slate-500">Consultez les profils et gérez les étapes du recrutement.</p></div>
+          {filtreJob && <div className="flex flex-wrap items-center gap-3 rounded-xl bg-violet-50 px-4 py-3 text-sm text-violet-700">Offre : <strong>{filtreJob.title}</strong><button onClick={() => setFiltreJob(null)} className="ml-auto inline-flex items-center gap-1 font-semibold hover:underline"><X size={15}/> Retirer le filtre</button></div>}
+          <div className="rounded-2xl border border-slate-100 bg-white shadow-sm"><div className="flex flex-col gap-4 border-b border-slate-100 p-5 xl:flex-row xl:items-center xl:justify-between"><div className="relative w-full xl:max-w-sm"><Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/><input aria-label="Rechercher un candidat" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Nom, email, poste, entreprise…" className="w-full rounded-xl border border-slate-200 py-2.5 pl-10 pr-3 text-sm outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"/></div><div className="flex flex-wrap gap-2">{STATUSES.map((status) => <button key={status} onClick={() => setFiltreStatut(status)} className={`rounded-full px-3 py-2 text-xs font-semibold transition ${filtreStatut === status ? 'bg-violet-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>{status}</button>)}</div></div>
+          {appsLoading ? <p className="p-8 text-sm text-slate-500">Chargement des candidatures…</p> : appsError ? <p className="p-8 text-sm text-rose-600">Impossible de charger les candidatures.</p> : filteredCandidatures.length === 0 ? <p className="p-8 text-sm text-slate-500">Aucune candidature ne correspond à ces critères.</p> : <div className="overflow-x-auto"><table className="w-full min-w-[950px] text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr>{['Candidat','Poste visé','Date','CV','Analyse IA','Statut'].map((h) => <th key={h} className="px-5 py-4 font-bold">{h}</th>)}</tr></thead><tbody className="divide-y divide-slate-100">{filteredCandidatures.map((c) => <tr key={c.id} className="hover:bg-slate-50/60"><td className="px-5 py-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-violet-100 text-xs font-bold text-violet-700">{initials(`${c.prenom || ''} ${c.nom || ''}`)}</span><div className="min-w-0"><p className="font-bold">{c.prenom} {c.nom}</p><p className="max-w-[180px] truncate text-xs text-slate-500">{c.email}</p></div></div></td><td className="px-5 py-4"><p className="font-semibold">{c.job_title}</p><p className="text-xs text-slate-500">{c.job_company}</p></td><td className="whitespace-nowrap px-5 py-4 text-slate-500">{dateLabel(c.applied_at)}</td><td className="px-5 py-4">{c.resume_path ? <a href={`${(apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '').replace(/\/$/, '')}${c.resume_path.startsWith('/') ? '' : '/'}${c.resume_path}`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 font-semibold text-violet-700 hover:underline"><FileText size={16}/> Voir le CV</a> : <span className="text-slate-400">—</span>}</td><td className="px-5 py-4">{aiEvaluating.has(c.id) ? <span className="inline-flex items-center gap-2 text-xs text-slate-500"><LoaderCircle size={15} className="animate-spin"/> Analyse…</span> : c.ai_score != null ? <button onClick={() => setAiResult(resultFrom(c, { score: c.ai_score, accepted: c.ai_decision, reasons: c.ai_reasons, summary: c.ai_summary }))} className="inline-flex items-center gap-1 rounded-lg bg-violet-50 px-3 py-2 text-xs font-bold text-violet-700 hover:bg-violet-100"><Activity size={15}/> Score {c.ai_score}/100</button> : c.resume_path?.toLowerCase().split('?')[0].endsWith('.pdf') ? <button onClick={() => handleEvaluate(c)} className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-3 py-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100"><Sparkles size={15}/> Analyser avec l’IA</button> : <span className="text-xs text-slate-400">CV PDF requis</span>}</td><td className="px-5 py-4"><select aria-label={`Statut de ${c.prenom} ${c.nom}`} value={c.statut || 'Pas encore traité'} disabled={busyStatuses.has(c.id)} onChange={(e) => handleStatutChange(c.id, e.target.value)} className={`max-w-[175px] cursor-pointer rounded-full border-0 px-3 py-2 text-xs font-bold outline-none ring-1 disabled:opacity-50 ${statusClasses[c.statut] || 'bg-slate-50 text-slate-600 ring-slate-200'}`}>{STATUSES.slice(1).map((s) => <option key={s} value={s}>{s}</option>)}</select></td></tr>)}</tbody></table></div>}</div>
+        </>}
+      </main>
+    </div>
+    <AIEvaluationModal result={aiResult} onClose={() => setAiResult(null)}/>
+  </div>;
 }

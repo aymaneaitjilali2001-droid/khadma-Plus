@@ -1,12 +1,27 @@
-const jwt = require('jsonwebtoken');
+import jwt from 'jsonwebtoken';
+
+function getCookieToken(cookieHeader) {
+  if (!cookieHeader) return null;
+
+  const tokenCookie = cookieHeader
+    .split(';')
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith('token='));
+
+  return tokenCookie ? decodeURIComponent(tokenCookie.slice('token='.length)) : null;
+}
 
 function requireAuth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  const tokenFromHeader = header?.startsWith('Bearer ')
+    ? header.slice('Bearer '.length)
+    : null;
+  const token = getCookieToken(req.headers.cookie) || tokenFromHeader;
+
+  if (!token) {
     return res.status(401).json({ error: 'Token manquant' });
   }
 
-  const token = header.slice('Bearer '.length);
   try {
     req.user = jwt.verify(token, process.env.JWT_SECRET);
     next();
@@ -24,4 +39,4 @@ function requireRole(...roles) {
   };
 }
 
-module.exports = { requireAuth, requireRole };
+export { requireAuth, requireRole };
